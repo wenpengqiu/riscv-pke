@@ -164,6 +164,11 @@ int free_process( process* proc ) {
   // but for proxy kernel, it (memory leaking) may NOT be a really serious issue,
   // as it is different from regular OS, which needs to run 7x24.
   proc->status = ZOMBIE;
+  // Lab3_Challenge1: 唤醒处于 BLOCKED 状态的父进程
+  if (proc->parent && proc->parent->status == BLOCKED) {
+      proc->parent->status = READY;
+      insert_to_ready_queue(proc->parent);
+  }
 
   return 0;
 }
@@ -191,7 +196,7 @@ int do_fork( process* parent)
         memcpy( (void*)lookup_pa(child->pagetable, child->mapped_info[STACK_SEGMENT].va),
           (void*)lookup_pa(parent->pagetable, parent->mapped_info[i].va), PGSIZE );
         break;
-      case HEAP_SEGMENT:
+      case HEAP_SEGMENT:{
         // build a same heap for child process.
 
         // convert free_pages_address into a filter to skip reclaimed blocks in the heap
@@ -221,6 +226,7 @@ int do_fork( process* parent)
         // copy the heap manager from parent to child
         memcpy((void*)&child->user_heap, (void*)&parent->user_heap, sizeof(parent->user_heap));
         break;
+      }
       case CODE_SEGMENT:
         // TODO (lab3_1): implment the mapping of child code segment to parent's
         // code segment.
@@ -245,6 +251,26 @@ int do_fork( process* parent)
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
         break;
+      
+      // Lab3_Challenge1: 实现数据段的复制
+      case DATA_SEGMENT:
+        // 遍历数据段的所有页，分配新页并复制内容
+        for (int j = 0; j < parent->mapped_info[i].npages; j++) {
+            uint64 addr = parent->mapped_info[i].va + j * PGSIZE;
+            // 为子进程分配物理页
+            void* child_pa = alloc_page();
+            // 复制父进程页面内容到新页
+            memcpy(child_pa, (void*)lookup_pa(parent->pagetable, addr), PGSIZE);
+            // 建立映射
+            user_vm_map((pagetable_t)child->pagetable, addr, PGSIZE, (uint64)child_pa,
+                        prot_to_type(PROT_WRITE | PROT_READ, 1));
+        }
+        // 更新子进程的段信息
+        child->mapped_info[child->total_mapped_region].va = parent->mapped_info[i].va;
+        child->mapped_info[child->total_mapped_region].npages = parent->mapped_info[i].npages;
+        child->mapped_info[child->total_mapped_region].seg_type = DATA_SEGMENT;
+        child->total_mapped_region++;
+        break;
     }
   }
 
@@ -254,4 +280,42 @@ int do_fork( process* parent)
   insert_to_ready_queue( child );
 
   return child->pid;
+}
+
+//
+// implement wait syscall. added @lab3_challenge1
+//
+int do_wait(int pid) {
+    while (1) {
+        int has_child = 0;
+        int found_pid = -1;
+        
+        // 遍历所有进程寻找子进程
+        for (int i = 0; i < NPROC; i++) {
+            // 必须是有效进程且父进程是当前进程
+            if (procs[i].status != FREE && procs[i].parent == current) {
+                // 如果 pid==-1 (等待任意子进程) 或者 pid==procs[i].pid (等待特定子进程)
+                if (pid == -1 || procs[i].pid == pid) {
+                    has_child = 1;
+                    // 如果发现僵尸子进程，进行回收
+                    if (procs[i].status == ZOMBIE) {
+                        found_pid = procs[i].pid;
+                        // 回收进程表项，使其变为 FREE 供后续使用
+                        procs[i].status = FREE;
+                        return found_pid;
+                    }
+                }
+            }
+        }
+
+        if (has_child) {
+            // 有符合条件的子进程但都在运行中，父进程阻塞并让出 CPU
+            current->status = BLOCKED;
+            schedule();
+            // 当被子进程唤醒后，循环继续，再次检查是否有僵尸子进程
+        } else {
+            // 没有找到符合条件的子进程
+            return -1;
+        }
+    }
 }
