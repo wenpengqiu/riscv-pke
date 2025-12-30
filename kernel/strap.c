@@ -6,6 +6,7 @@
 #include "process.h"
 #include "strap.h"
 #include "syscall.h"
+#include "memlayout.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "util/functions.h"
@@ -56,13 +57,18 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
   sprint("handle_page_fault: %lx\n", stval);
   switch (mcause) {
     case CAUSE_STORE_PAGE_FAULT:
-      // TODO (lab2_3): implement the operations that solve the page fault to
-      // dynamically increase application stack.
-      // hint: first allocate a new physical page, and then, maps the new page to the
-      // virtual address that causes the page fault.
-      // panic( "You need to implement the operations that actually handle the page fault in lab2_3.\n" );
-      user_vm_map((pagetable_t) current->pagetable, stval - stval % PGSIZE, PGSIZE, (uint64) alloc_page(), prot_to_type(PROT_WRITE | PROT_READ, 1));
-
+      // Lab2_challenge1: 区分栈扩展和非法访问
+      // 判断逻辑：如果缺页地址在 USER_STACK_TOP 以下，且在允许的最大栈范围内（例如 20 页）
+      // 则认为是合法的栈扩展请求。
+      if (stval < USER_STACK_TOP && stval >= (USER_STACK_TOP - 20 * PGSIZE)) {
+          // 1. 合法栈扩展：分配物理页并映射
+          user_vm_map((pagetable_t)current->pagetable, stval - stval % PGSIZE, PGSIZE, (uint64)alloc_page(), prot_to_type(PROT_WRITE | PROT_READ, 1));
+      } else {
+          // 2. 非法访问（如堆越界）：报错并退出
+          sprint("this address is not available!\n");
+          // 直接调用 shutdown(-1) 终止系统，或者调用 sys_user_exit(-1)
+          shutdown(-1);
+      }
       break;
     default:
       sprint("unknown page fault.\n");
