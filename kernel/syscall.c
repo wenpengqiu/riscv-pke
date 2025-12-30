@@ -12,10 +12,72 @@
 #include "util/functions.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "vfs.h"
 #include "sched.h"
 #include "proc_file.h"
 
 #include "spike_interface/spike_utils.h"
+
+//
+// get current working directory
+//
+ssize_t sys_user_rcwd(char *pathva) {
+  char *pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
+  struct dentry *cwd = current->pfiles->cwd;
+  
+  // 更加完善的 pwd 实现：
+  char temp_path[MAX_PATH_LEN * 5];
+  temp_path[0] = '\0';
+  
+  struct dentry *d = cwd;
+  if (d == vfs_root_dentry) {
+      strcpy(pathpa, "/");
+      return 0;
+  }
+  
+  struct dentry *stack[10];
+  int top = 0;
+  while (d != vfs_root_dentry && d != NULL) {
+      stack[top++] = d;
+      d = d->parent;
+  }
+  
+  strcpy(pathpa, "");
+  while (top > 0) {
+      strcat(pathpa, "/");
+      strcat(pathpa, stack[--top]->name);
+  }
+  
+  return 0;
+}
+
+//
+// change current working directory
+//
+ssize_t sys_user_ccwd(char *pathva) {
+  char *pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
+  
+  struct dentry *parent = vfs_root_dentry;
+  if (pathpa[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
+  
+  char miss_name[MAX_PATH_LEN];
+  struct dentry *target = lookup_final_dentry(pathpa, &parent, miss_name);
+  
+  if (!target) {
+      sprint("sys_user_ccwd: directory not found!\n");
+      return -1;
+  }
+  
+  if (target->dentry_inode->type != DIR_I) {
+      sprint("sys_user_ccwd: not a directory!\n");
+      return -1;
+  }
+  
+  current->pfiles->cwd = target;
+  return 0;
+}
 
 //
 // implement the SYS_user_print syscall
@@ -264,6 +326,10 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    case SYS_user_rcwd:
+      return sys_user_rcwd((char *)a1);
+    case SYS_user_ccwd:
+      return sys_user_ccwd((char *)a1);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

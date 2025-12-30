@@ -5,6 +5,7 @@
 #include "vfs.h"
 
 #include "pmm.h"
+#include "process.h"
 #include "spike_interface/spike_utils.h"
 #include "util/string.h"
 #include "util/types.h"
@@ -110,6 +111,10 @@ struct super_block *vfs_mount(const char *dev_name, int mnt_type) {
 //
 struct file *vfs_open(const char *path, int flags) {
   struct dentry *parent = vfs_root_dentry; // we start the path lookup from root.
+  if (path[0] != '/') {
+      // 相对路径：从当前工作目录开始
+      parent = current->pfiles->cwd;
+  }
   char miss_name[MAX_PATH_LEN];
 
   // path lookup.
@@ -261,6 +266,9 @@ int vfs_disk_stat(struct file *file, struct istat *istat) {
 //
 int vfs_link(const char *oldpath, const char *newpath) {
   struct dentry *parent = vfs_root_dentry;
+  if (oldpath[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
   char miss_name[MAX_PATH_LEN];
 
   // lookup oldpath
@@ -277,6 +285,9 @@ int vfs_link(const char *oldpath, const char *newpath) {
   }
 
   parent = vfs_root_dentry;
+  if (newpath[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
   // lookup the newpath
   // note that parent is changed to be the last directory entry to be accessed
   struct dentry *new_file_dentry =
@@ -311,6 +322,9 @@ int vfs_link(const char *oldpath, const char *newpath) {
 //
 int vfs_unlink(const char *path) {
   struct dentry *parent = vfs_root_dentry;
+  if (path[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
   char miss_name[MAX_PATH_LEN];
 
   // lookup the file, find its parent direntry
@@ -400,6 +414,9 @@ int vfs_close(struct file *file) {
 //
 struct file *vfs_opendir(const char *path) {
   struct dentry *parent = vfs_root_dentry;
+  if (path[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
   char miss_name[MAX_PATH_LEN];
 
   // lookup the dir
@@ -444,6 +461,9 @@ int vfs_readdir(struct file *file, struct dir *dir) {
 //
 int vfs_mkdir(const char *path) {
   struct dentry *parent = vfs_root_dentry;
+  if (path[0] != '/') {
+      parent = current->pfiles->cwd;
+  }
   char miss_name[MAX_PATH_LEN];
 
   // lookup the dir, find its parent direntry
@@ -523,6 +543,20 @@ struct dentry *lookup_final_dentry(const char *path, struct dentry **parent,
 
   while (token != NULL) {
     *parent = this;
+
+    if (strcmp(token, ".") == 0) {
+        // 当前目录，不做改变，继续下一个 token
+        token = strtok(NULL, "/");
+        continue;
+    } else if (strcmp(token, "..") == 0) {
+        // 父目录
+        if (this->parent != NULL) {
+            this = this->parent;
+        }
+        // 如果已经是根目录 (parent == NULL)，则保持在根目录
+        token = strtok(NULL, "/");
+        continue;
+    }
     this = hash_get_dentry((*parent), token);  // try hash first
     if (this == NULL) {
       // if not found in hash, try to find it in the directory
