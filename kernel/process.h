@@ -2,6 +2,7 @@
 #define _PROC_H_
 
 #include "riscv.h"
+#include "spike_interface/spike_file.h"
 
 typedef struct trapframe_t {
   // space to store context (all common registers)
@@ -21,6 +22,7 @@ typedef struct process_t {
   uint64 kstack;
   // trapframe storing the context of a (User mode) process.
   trapframe* trapframe;
+  spike_file_t *elf_file;
 }process;
 
 void switch_to(process*);

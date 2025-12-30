@@ -60,4 +60,26 @@ elf_status elf_load(elf_ctx *ctx);
 
 void load_bincode_from_host_elf(process *p);
 
+typedef struct elf_sect_header_t {
+  uint32 name;
+  uint32 type;
+  uint64 flags;
+  uint64 addr;
+  uint64 offset;
+  uint64 size;
+  uint32 link;
+  uint32 info;
+  uint64 addralign;
+  uint64 entsize;
+} elf_sect_header;
+
+typedef struct elf_symbol_t {
+  uint32 name;
+  uint8  info;
+  uint8  other;
+  uint16 shndx;
+  uint64 value;
+  uint64 size;
+} elf_symbol;
+
 #endif
