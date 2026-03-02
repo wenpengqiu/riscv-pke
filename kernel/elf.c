@@ -8,6 +8,8 @@
 #include "riscv.h"
 #include "spike_interface/spike_utils.h"
 
+static char debug_line_buffer[256 * 1024];
+
 typedef struct elf_info_t {
   spike_file_t *f;
   process *p;
@@ -279,6 +281,33 @@ void load_bincode_from_host_elf(process *p) {
 
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
+
+  // 1. 获取 Section Header String Table (.shstrtab) 的偏移
+  elf_sect_header shstrtab_hdr;
+  elf_fpread(&elfloader, (void *)&shstrtab_hdr, sizeof(elf_sect_header), 
+             elfloader.ehdr.shoff + elfloader.ehdr.shstrndx * sizeof(elf_sect_header));
+  
+  // 分配临时空间读取 shstrtab
+  char shstrtab[shstrtab_hdr.size];
+  elf_fpread(&elfloader, (void *)shstrtab, shstrtab_hdr.size, shstrtab_hdr.offset);
+
+  // 2. 遍历所有的 Section Header，寻找 .debug_line
+  for (int i = 0; i < elfloader.ehdr.shnum; i++) {
+    elf_sect_header shdr;
+    elf_fpread(&elfloader, (void *)&shdr, sizeof(elf_sect_header), 
+               elfloader.ehdr.shoff + i * sizeof(elf_sect_header));
+    
+    char *sect_name = shstrtab + shdr.name;
+    if (strcmp(sect_name, ".debug_line") == 0) {
+      // 找到了 .debug_line 段，将其内容读取到我们预先准备的 buffer 的开头
+      elf_fpread(&elfloader, (void *)debug_line_buffer, shdr.size, shdr.offset);
+      
+      // 调用分支自带的 make_addr_line 解析 DWARF 信息
+      // （请确认该分支 elf.c 中 make_addr_line 的确切签名，这里以实验说明的描述为准）
+      make_addr_line(&elfloader, debug_line_buffer, shdr.size);
+      break;
+    }
+  }
 
   // close the host spike file
   spike_file_close( info.f );
