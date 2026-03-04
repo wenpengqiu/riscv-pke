@@ -1,6 +1,12 @@
 /*
  * Utility functions for trap handling in Supervisor mode.
  */
+#ifndef PTE_A
+#define PTE_A (1L << 6)
+#endif
+#ifndef PTE_D
+#define PTE_D (1L << 7)
+#endif
 
 #include "riscv.h"
 #include "process.h"
@@ -10,6 +16,7 @@
 #include "vmm.h"
 #include "sched.h"
 #include "util/functions.h"
+#include "util/string.h"
 
 #include "spike_interface/spike_utils.h"
 
@@ -56,15 +63,43 @@ void handle_mtimer_trap() {
 void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
   sprint("handle_page_fault: %lx\n", stval);
   switch (mcause) {
-    case CAUSE_STORE_PAGE_FAULT:
-      // TODO (lab2_3): implement the operations that solve the page fault to
-      // dynamically increase application stack.
-      // hint: first allocate a new physical page, and then, maps the new page to the
-      // virtual address that causes the page fault.
-      // panic( "You need to implement the operations that actually handle the page fault in lab2_3.\n" );
-      user_vm_map((pagetable_t) current->pagetable, stval - stval % PGSIZE, PGSIZE, (uint64) alloc_page(), prot_to_type(PROT_WRITE | PROT_READ, 1));
-
+    case CAUSE_STORE_PAGE_FAULT: {
+      pte_t *pte = lookup_pte(current->pagetable, stval);
+      
+      // 如果是 COW 触发的 Store Fault
+      if (pte && (*pte & PTE_COW)) {
+          void *pa = (void *)PTE2PA(*pte);
+          int ref = get_page_ref(pa);
+          
+          if (ref > 1) {
+              // 有其他进程共享该页，分配新页并拷贝数据
+              void *new_pa = alloc_page();
+              memcpy(new_pa, pa, PGSIZE);
+              
+              // 释放对原物理页的引用
+              free_page(pa);
+              
+              // 重新构造 PTE：指向新物理页，恢复可写(PTE_W)，移除 COW
+              // 【核心修复】：必须同时打上 Accessed (PTE_A) 和 Dirty (PTE_D) 标记！
+              uint64 flags = *pte & 0x3FF; // 获取原本权限位
+              flags |= PTE_W | PTE_A | PTE_D; 
+              flags &= ~PTE_COW;
+              *pte = PA2PTE((uint64)new_pa) | flags;
+          } else {
+              // 引用计数为 1，说明别的共享者都已经退出了，此时只需恢复权限
+              *pte |= PTE_W | PTE_A | PTE_D;
+              *pte &= ~PTE_COW;
+          }
+          flush_tlb();
+      } else {
+          // 常规按需缺页分配
+          user_vm_map((pagetable_t) current->pagetable, 
+                      stval - stval % PGSIZE, PGSIZE, 
+                      (uint64) alloc_page(), 
+                      prot_to_type(PROT_WRITE | PROT_READ, 1));
+      }
       break;
+    }
     default:
       sprint("unknown page fault.\n");
       break;

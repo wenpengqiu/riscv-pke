@@ -215,3 +215,7 @@ void print_proc_vmspace(process* proc) {
     sprint( ", mapped to pa:%lx\n", lookup_pa(proc->pagetable, proc->mapped_info[i].va) );
   }
 }
+
+pte_t *lookup_pte(pagetable_t pagetable, uint64 va) {
+    return page_walk(pagetable, va, 0); // alloc = 0, 不做额外分配
+}

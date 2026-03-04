@@ -33,4 +33,5 @@ void user_vm_map(pagetable_t page_dir, uint64 va, uint64 size, uint64 pa, int pe
 void user_vm_unmap(pagetable_t page_dir, uint64 va, uint64 size, int free);
 void print_proc_vmspace(process* proc);
 
+pte_t *lookup_pte(pagetable_t pagetable, uint64 va);
 #endif

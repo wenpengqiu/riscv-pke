@@ -195,6 +195,7 @@ static inline void flush_tlb(void) { asm volatile("sfence.vma zero, zero"); }
 #define PTE_W (1L << 2)  // writable
 #define PTE_X (1L << 3)  // executable
 #define PTE_U (1L << 4)  // 1->user can access, 0->otherwise
+#define PTE_COW (1L << 8)
 #define PTE_G (1L << 5)  // global
 #define PTE_A (1L << 6)  // accessed
 #define PTE_D (1L << 7)  // dirty
