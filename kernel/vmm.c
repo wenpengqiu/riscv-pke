@@ -10,6 +10,7 @@
 #include "util/string.h"
 #include "spike_interface/spike_utils.h"
 #include "util/functions.h"
+#include "config.h"
 
 /* --- utility functions for virtual address mapping --- */
 //
