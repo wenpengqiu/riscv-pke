@@ -8,22 +8,27 @@
 #include "process.h"
 
 #include "spike_interface/spike_utils.h"
+#include "spike_interface/atomic.h"
 
+volatile int app_load_sync = 0;
 // process is a structure defined in kernel/process.h
-process user_app;
+process user_app[NCPU]; // 进程池改为数组
 
 //
 // load the elf, and construct a "process" (with only a trapframe).
 // load_bincode_from_host_elf is defined in elf.c
 //
 void load_user_program(process *proc) {
-  // USER_TRAP_FRAME is a physical address defined in kernel/config.h
-  proc->trapframe = (trapframe *)USER_TRAP_FRAME;
-  memset(proc->trapframe, 0, sizeof(trapframe));
-  // USER_KSTACK is also a physical address defined in kernel/config.h
-  proc->kstack = USER_KSTACK;
-  proc->trapframe->regs.sp = USER_STACK;
+  // 获取当前硬件线程的 ID (核号)
+  uint64 hartid = read_tp(); 
 
+  // 使用带 hartid 参数的宏，为当前核分配独立的内存空间
+  proc->trapframe = (trapframe *)USER_TRAP_FRAME(hartid);
+  memset(proc->trapframe, 0, sizeof(trapframe));
+  proc->kstack = USER_KSTACK(hartid);
+  proc->trapframe->regs.sp = USER_STACK(hartid);
+
+  proc->trapframe->regs.tp = hartid;
   // load_bincode_from_host_elf() is defined in kernel/elf.c
   load_bincode_from_host_elf(proc);
 }
@@ -32,21 +37,21 @@ void load_user_program(process *proc) {
 // s_start: S-mode entry point of riscv-pke OS kernel.
 //
 int s_start(void) {
-  sprint("hartid = ?: Enter supervisor mode...\n");
-  // Note: we use direct (i.e., Bare mode) for memory mapping in lab1.
-  // which means: Virtual Address = Physical Address
-  // therefore, we need to set satp to be 0 for now. we will enable paging in lab2_x.
-  // 
-  // write_csr is a macro defined in kernel/riscv.h
+  uint64 hartid = read_tp();
+  sprint("hartid = %ld: Enter supervisor mode...\n", hartid);
   write_csr(satp, 0);
 
-  // the application code (elf) is first loaded into memory, and then put into execution
-  load_user_program(&user_app);
+  // 严格串行化 ELF 加载过程，防止多个核同时底层冲突
+  if (hartid == 0) {
+    load_user_program(&user_app[0]);
+    app_load_sync = 1; // 0号核加载完毕，通知 1 号核开始
+    mb();
+  } else {
+    while (app_load_sync == 0) { mb(); } // 1号核等待 0 号核
+    load_user_program(&user_app[1]);
+  }
 
-  sprint("hartid = ?: Switch to user mode...\n");
-  // switch_to() is defined in kernel/process.c
-  switch_to(&user_app);
-
-  // we should never reach here.
+  sprint("hartid = %ld: Switch to user mode...\n", hartid);
+  switch_to(&user_app[hartid]);
   return 0;
 }

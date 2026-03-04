@@ -106,19 +106,20 @@ static size_t parse_args(arg_buf *arg_bug_msg) {
 //
 void load_bincode_from_host_elf(process *p) {
   arg_buf arg_bug_msg;
-
-  // retrieve command line arguements
   size_t argc = parse_args(&arg_bug_msg);
-  if (!argc) panic("You need to specify the application program!\n");
+  if (argc < 2) panic("You need to specify two application programs!\n");
 
-  sprint("hartid = ?: Application: %s\n", arg_bug_msg.argv[0]);
+  uint64 hartid = read_tp(); // 获取当前核 ID
+  char* app_name = arg_bug_msg.argv[hartid]; // 0号核加载 argv[0]，1号核加载 argv[1]
+
+  sprint("hartid = %ld: Application: %s\n", hartid, app_name);
 
   //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
   elf_ctx elfloader;
   // elf_info is defined above, used to tie the elf file and its corresponding process.
   elf_info info;
 
-  info.f = spike_file_open(arg_bug_msg.argv[0], O_RDONLY, 0);
+  info.f = spike_file_open(app_name, O_RDONLY, 0);
   info.p = p;
   // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
   if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
@@ -131,10 +132,13 @@ void load_bincode_from_host_elf(process *p) {
   if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
 
   // entry (virtual, also physical in lab1_x) address
+  p->trapframe = (trapframe *)USER_TRAP_FRAME(hartid);
+  p->kstack = USER_KSTACK(hartid);
+  p->trapframe->regs.sp = USER_STACK(hartid);
   p->trapframe->epc = elfloader.ehdr.entry;
 
   // close the host spike file
   spike_file_close( info.f );
 
-  sprint("hartid = ?: Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  sprint("hartid = %ld: Application program entry point (virtual address): 0x%lx\n", hartid, p->trapframe->epc);
 }
