@@ -65,4 +65,6 @@ elf_status elf_load(elf_ctx *ctx);
 
 void load_bincode_from_host_elf(process *p);
 
+// added @lab4_challenge2: 支持指定路径的 ELF 加载
+void load_bincode_from_host_elf_path(process *p, char *path);
 #endif

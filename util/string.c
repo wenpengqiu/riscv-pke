@@ -55,6 +55,18 @@ int strcmp(const char* s1, const char* s2) {
   return c1 - c2;
 }
 
+int strncmp(const char* s1, const char* s2, size_t n) {
+  if (n == 0) return 0;
+  unsigned char c1, c2;
+
+  do {
+    c1 = *s1++;
+    c2 = *s2++;
+  } while (c1 != 0 && c1 == c2 && --n > 0);
+
+  return c1 - c2;
+}
+
 char* strcpy(char* dest, const char* src) {
   char* d = dest;
   while ((*d++ = *src++))

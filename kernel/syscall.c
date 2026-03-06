@@ -14,6 +14,9 @@
 #include "vmm.h"
 #include "sched.h"
 #include "proc_file.h"
+#include "vfs.h"
+#include "elf.h"
+#include "memlayout.h"
 
 #include "spike_interface/spike_utils.h"
 
@@ -27,6 +30,120 @@ ssize_t sys_user_print(const char* buf, size_t n) {
   char* pa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)buf);
   sprint(pa);
   return 0;
+}
+
+// added @lab4_challenge2
+ssize_t sys_user_exec(char *command) {
+    // 1. 从用户空间深拷贝命令，【核心修复】：强行过滤掉所有的回车和换行符
+    char kcommand[256];
+    int i = 0;
+    while(i < 255) {
+        char *pa = (char*)user_va_to_pa((pagetable_t)current->pagetable, command + i);
+        if (!pa || *pa == '\0') break;
+        if (*pa == '\n' || *pa == '\r') {
+            kcommand[i] = ' '; // 将换行替换为空格，方便后续分割
+        } else {
+            kcommand[i] = *pa;
+        }
+        i++;
+    }
+    kcommand[i] = '\0';
+
+    // 2. 原地按空格分割字符串，构造 kargv 指针数组
+    char *kargv[32];
+    int argc = 0;
+    char *p = kcommand;
+    while (*p) {
+        while (*p == ' ') p++; 
+        if (*p == '\0') break;
+        kargv[argc++] = p;     
+        while (*p != ' ' && *p != '\0') p++; 
+        if (*p == ' ') {
+            *p = '\0';         
+            p++;
+        }
+    }
+    if (argc == 0) return -1;  
+
+    char *kpath = kargv[0];    
+
+    // 3. 智能路径转换 (去除 ./ 前缀，直接使用 obj/)
+    char actual_path[256];
+    if (strncmp(kpath, "/bin/", 5) == 0) {
+        strcpy(actual_path, "hostfs_root/bin/");
+        strcat(actual_path, kpath + 5);
+    } else {
+        strcpy(actual_path, kpath);
+    }
+
+    sprint("Application: %s\n", kpath);
+
+    // 4. 【核心修复】：更安全地释放旧的 CODE 和 DATA 段 (通过类型精准打击)
+    for (int k = 0; k < current->total_mapped_region; k++) {
+        if (current->mapped_info[k].seg_type == CODE_SEGMENT ||
+            current->mapped_info[k].seg_type == DATA_SEGMENT) {
+            user_vm_unmap((pagetable_t)current->pagetable, 
+                          current->mapped_info[k].va, 
+                          current->mapped_info[k].npages * PGSIZE, 1);
+            current->mapped_info[k].va = 0;
+            current->mapped_info[k].npages = 0;
+            current->mapped_info[k].seg_type = 0;
+        }
+    }
+
+    // 5. 【核心修复】：清空进程的 HEAP 段并清除映射表记录
+    for (uint64 heap_va = USER_FREE_ADDRESS_START; heap_va < current->user_heap.heap_top; heap_va += PGSIZE) {
+        uint64 pa = lookup_pa((pagetable_t)current->pagetable, heap_va);
+        if (pa) {
+            user_vm_unmap((pagetable_t)current->pagetable, heap_va, PGSIZE, 1);
+        }
+    }
+    current->user_heap.heap_top = USER_FREE_ADDRESS_START;
+    current->user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+    current->user_heap.free_pages_count = 0;
+    for (int k = 0; k < current->total_mapped_region; k++) {
+        if (current->mapped_info[k].seg_type == HEAP_SEGMENT) {
+            current->mapped_info[k].npages = 0;
+            current->mapped_info[k].va = 0;
+        }
+    }
+
+    // 6. 载入新程序的 ELF 文件
+    load_bincode_from_host_elf_path(current, actual_path);
+
+    // 7. 重置并精细化布置用户栈 
+    uint64 user_stack_pa = lookup_pa((pagetable_t)current->pagetable, USER_STACK_TOP - PGSIZE);
+    char *sp_pa = (char*)(user_stack_pa + PGSIZE);
+    uint64 sp_va = USER_STACK_TOP;
+
+    uint64 argv_va[32];
+    for (int k = argc - 1; k >= 0; k--) {
+        int len = strlen(kargv[k]) + 1;
+        sp_pa -= len;
+        sp_va -= len;
+        strcpy(sp_pa, kargv[k]);
+        argv_va[k] = sp_va; 
+    }
+    argv_va[argc] = 0; 
+
+    int align = sp_va % 16;
+    sp_pa -= align;
+    sp_va -= align;
+
+    sp_pa -= sizeof(uint64) * (argc + 1);
+    sp_va -= sizeof(uint64) * (argc + 1);
+    
+    align = sp_va % 16;
+    sp_pa -= align;
+    sp_va -= align;
+
+    memcpy(sp_pa, argv_va, sizeof(uint64) * (argc + 1));
+
+    // 8. 魔法操作：在 trapframe 中布置入口参数！
+    current->trapframe->regs.a1 = sp_va;
+    current->trapframe->regs.sp = sp_va;
+
+    return argc; 
 }
 
 //
@@ -264,6 +381,8 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    case SYS_user_exec:
+      return sys_user_exec((char *)a1);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

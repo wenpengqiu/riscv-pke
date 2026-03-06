@@ -167,3 +167,9 @@ int unlink_u(const char *fn){
 int close(int fd) {
   return do_user_call(SYS_user_close, fd, 0, 0, 0, 0, 0, 0);
 }
+
+// added @lab4_challenge2
+int exec(char *command) {
+  // 我们将整个 command 字符串作为 a1 传递进入内核
+  return do_user_call(SYS_user_exec, (uint64)command, 0, 0, 0, 0, 0, 0);
+}

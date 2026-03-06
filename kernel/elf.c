@@ -136,6 +136,40 @@ static size_t parse_args(arg_buf *arg_bug_msg) {
 //
 // load the elf of user application, by using the spike file interface.
 //
+// added @lab4_challenge2
+void load_bincode_from_host_elf_path(process *p, char *path) {
+  elf_ctx elfloader;
+  elf_info info;
+
+  info.f = spike_file_open(path, O_RDONLY, 0);
+  
+  // 【核心修复】：如果直连打不开，智能提取文件名并强制去 obj/ 目录下搜寻
+  if (IS_ERR_VALUE(info.f)) {
+      char alt_path[256] = "hostfs_root/bin/";
+      char *basename = path;
+      for (int i = strlen(path) - 1; i >= 0; i--) {
+          if (path[i] == '/') { basename = path + i + 1; break; }
+      }
+      strcat(alt_path, basename);
+      // sprint("exec: host file not found, retry loading fallback [%s]\n", alt_path);
+      info.f = spike_file_open(alt_path, O_RDONLY, 0);
+  }
+
+  info.p = p;
+  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
+
+  if (elf_init(&elfloader, &info) != EL_OK)
+    panic("fail to init elfloader.\n");
+
+  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
+
+  p->trapframe->epc = elfloader.ehdr.entry;
+
+  spike_file_close( info.f );
+  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+}
+
+// 修改原有的函数，使其复用新的加载逻辑（适配 kernel.c 启动时的行为）
 void load_bincode_from_host_elf(process *p) {
   arg_buf arg_bug_msg;
 
@@ -145,28 +179,6 @@ void load_bincode_from_host_elf(process *p) {
 
   sprint("Application: %s\n", arg_bug_msg.argv[0]);
 
-  //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
-  elf_ctx elfloader;
-  // elf_info is defined above, used to tie the elf file and its corresponding process.
-  elf_info info;
-
-  info.f = spike_file_open(arg_bug_msg.argv[0], O_RDONLY, 0);
-  info.p = p;
-  // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
-  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
-
-  // init elfloader context. elf_init() is defined above.
-  if (elf_init(&elfloader, &info) != EL_OK)
-    panic("fail to init elfloader.\n");
-
-  // load elf. elf_load() is defined above.
-  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
-
-  // entry (virtual, also physical in lab1_x) address
-  p->trapframe->epc = elfloader.ehdr.entry;
-
-  // close the host spike file
-  spike_file_close( info.f );
-
-  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  // 调用抽取出的新函数
+  load_bincode_from_host_elf_path(p, arg_bug_msg.argv[0]);
 }
