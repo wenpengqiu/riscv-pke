@@ -14,8 +14,11 @@
 #include "vmm.h"
 #include "sched.h"
 #include "proc_file.h"
+#include "memlayout.h"
+#include "elf.h"
 
 #include "spike_interface/spike_utils.h"
+extern process procs[NPROC];
 
 //
 // implement the SYS_user_print syscall
@@ -34,10 +37,144 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 //
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
-  // reclaim the current process, and reschedule. added @lab3_1
-  free_process( current );
+  current->status = ZOMBIE;
+  // 如果父进程正在等待，唤醒父进程
+  if (current->parent && current->parent->status == BLOCKED) {
+    current->parent->status = READY;
+    insert_to_ready_queue(current->parent);
+  }
   schedule();
   return 0;
+}
+
+ssize_t sys_user_wait(int pid) {
+  if (pid < 0) return -1;
+
+  int found = 0;
+  for (int i = 0; i < NPROC; i++) {
+    if (procs[i].pid == pid && procs[i].parent == current &&
+        procs[i].status != FREE) {
+      found = 1;
+
+      if (procs[i].status == ZOMBIE) {
+        free_process(&procs[i]);
+        return 0;
+      }
+    }
+  }
+
+  if (!found) return -1;
+
+  // PKE 的 schedule() 不会“返回到这里”继续执行 wait。
+  // 父进程被子进程唤醒后，会直接回到用户态。
+  // 所以必须把 epc 回退，让它重新执行 ecall，再次进入 wait，
+  // 这次才能看到子进程已经 ZOMBIE，并正常 return 0。
+  current->trapframe->epc -= 4;
+  current->status = BLOCKED;
+  schedule();
+
+  return 0;
+}
+
+//
+// implement the SYS_user_exec syscall
+//
+ssize_t sys_user_exec(char *command, char *parameter) {
+  char *pa_cmd = (char*)user_va_to_pa((pagetable_t)(current->pagetable), command);
+  char *pa_parameter = (char*)user_va_to_pa((pagetable_t)(current->pagetable), parameter);
+
+  char cmd_buf[128];
+  char param_buf[128];
+  cmd_buf[0] = '\0';
+  param_buf[0] = '\0';
+
+  if (pa_cmd == 0) return -1;
+  strcpy(cmd_buf, pa_cmd);
+
+  if (pa_parameter) {
+    strcpy(param_buf, pa_parameter);
+  }
+
+  // 3. 卸载当前进程旧的代码段、数据段，防止与新程序的地址空间冲突
+  int valid_idx = 0;
+  for (int i = 0; i < current->total_mapped_region; i++) {
+    int stype = current->mapped_info[i].seg_type;
+    if (stype == CODE_SEGMENT || stype == DATA_SEGMENT) {
+      // 这里不能 free 旧页，否则 fork 后父子共享的代码页会被子进程 exec 误释放
+      user_vm_unmap((pagetable_t)current->pagetable,
+                    current->mapped_info[i].va,
+                    current->mapped_info[i].npages * PGSIZE, 0);
+
+      current->mapped_info[i].va = 0;
+      current->mapped_info[i].npages = 0;
+      current->mapped_info[i].seg_type = 0;
+    } else {
+      if (stype == HEAP_SEGMENT) {
+        current->mapped_info[i].npages = 0;
+        current->user_heap.heap_top = USER_FREE_ADDRESS_START;
+        current->user_heap.free_pages_count = 0;
+      }
+
+      current->mapped_info[valid_idx] = current->mapped_info[i];
+      if (i != valid_idx) {
+        current->mapped_info[i].va = 0;
+        current->mapped_info[i].npages = 0;
+        current->mapped_info[i].seg_type = 0;
+      }
+      valid_idx++;
+    }
+  }
+  current->total_mapped_region = valid_idx;
+
+  // 4. 将新程序的可执行代码覆盖装载进当前的进程页表之中
+  load_bincode_from_host_elf(current, cmd_buf);
+
+  // 5. 重置用户栈并传入参数 (argc 与 argv)
+  uint64 sp = USER_STACK_TOP;
+
+  int cmd_len = strlen(cmd_buf) + 1;
+  int param_len = strlen(param_buf) + 1;
+  int has_param = strlen(param_buf) > 0;
+
+  // 退栈，压入参数二的字符串内容 (如果有的话)
+  uint64 va_param = 0;
+  if (has_param) {
+      sp -= param_len;
+      char *pa_stack_param = (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)sp);
+      strcpy(pa_stack_param, param_buf);
+      va_param = sp;
+  }
+
+  // 退栈，压入命令名，这是为了完整性放到用户栈，但我们可以不在 argv 中体现它
+  sp -= cmd_len;
+  char *pa_stack_cmd = (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)sp);
+  strcpy(pa_stack_cmd, cmd_buf);
+  uint64 va_cmd = sp;
+
+  // RISC-V 约定：栈顶指针 (sp) 必须向下进行 16 字节 (16-byte) 对齐
+  sp = sp & ~(uint64)15;
+
+  // 预留 argv[] 数组空间 (存放3个 64bit 地址)
+  // 因为参数指针为 8 字节，这里预留 32 字节依然保持 16 字节对齐
+  sp -= 32; 
+  uint64 *pa_argv = (uint64 *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)sp);
+
+  int argc = has_param ? 1 : 0;
+  if (has_param) {
+      // PKE风格：直接把参数放在 argv[0] 供应用读取
+      pa_argv[0] = va_param; 
+      pa_argv[1] = 0; // null结尾
+  } else {
+      pa_argv[0] = 0; // 没有参数
+  }
+  
+  // 6. 根据 RISC-V 约定更新相关寄存器环境 
+  current->trapframe->regs.a1 = sp;         // a1 写入 argv[] 首地址指针
+  current->trapframe->regs.sp = sp;         // 更新当前进程 SP 到栈底
+
+  // 【核心修改】：直接返回 argc，作为系统调用的返回值。
+  // 它会被操作系统的 Trap 机制装载到进程的 a0 寄存器，成为新程序的实际 argc！
+  return argc; 
 }
 
 //
@@ -103,7 +240,16 @@ ssize_t sys_user_yield() {
 //
 ssize_t sys_user_open(char *pathva, int flags) {
   char* pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
-  return do_open(pathpa, flags);
+  char safe_path[128]; // 使用内核栈或分配页来保证安全
+  // 加一把防弹锁，只拷有效字节并确保结束
+  int max_len = 127;
+  int i = 0;
+  while (i < max_len && pathpa[i] != '\0') {
+    safe_path[i] = pathpa[i];
+    i++;
+  }
+  safe_path[i] = '\0';
+  return do_open(safe_path, flags);
 }
 
 //
@@ -111,13 +257,17 @@ ssize_t sys_user_open(char *pathva, int flags) {
 //
 ssize_t sys_user_read(int fd, char *bufva, uint64 count) {
   int i = 0;
-  while (i < count) { // count can be greater than page size
+  while ((uint64)i < count) {
     uint64 addr = (uint64)bufva + i;
     uint64 pa = lookup_pa((pagetable_t)current->pagetable, addr);
     uint64 off = addr - ROUNDDOWN(addr, PGSIZE);
     uint64 len = count - i < PGSIZE - off ? count - i : PGSIZE - off;
-    uint64 r = do_read(fd, (char *)pa + off, len);
-    i += r; if (r < len) return i;
+
+    ssize_t r = do_read(fd, (char *)pa + off, len);
+    if (r < 0) return i == 0 ? -1 : i;
+
+    i += r;
+    if ((uint64)r < len) return i;
   }
   return count;
 }
@@ -127,13 +277,17 @@ ssize_t sys_user_read(int fd, char *bufva, uint64 count) {
 //
 ssize_t sys_user_write(int fd, char *bufva, uint64 count) {
   int i = 0;
-  while (i < count) { // count can be greater than page size
+  while ((uint64)i < count) {
     uint64 addr = (uint64)bufva + i;
     uint64 pa = lookup_pa((pagetable_t)current->pagetable, addr);
     uint64 off = addr - ROUNDDOWN(addr, PGSIZE);
     uint64 len = count - i < PGSIZE - off ? count - i : PGSIZE - off;
-    uint64 r = do_write(fd, (char *)pa + off, len);
-    i += r; if (r < len) return i;
+
+    ssize_t r = do_write(fd, (char *)pa + off, len);
+    if (r < 0) return i == 0 ? -1 : i;
+
+    i += r;
+    if ((uint64)r < len) return i;
   }
   return count;
 }
@@ -171,9 +325,13 @@ ssize_t sys_user_close(int fd) {
 //
 // lib call to opendir
 //
-ssize_t sys_user_opendir(char * pathva){
-  char * pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
-  return do_opendir(pathpa);
+ssize_t sys_user_opendir(char *pathva){
+  char *pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
+  char safe_path[128];
+  int i = 0;
+  while (i < 127 && pathpa[i] != '\0') { safe_path[i] = pathpa[i]; i++; }
+  safe_path[i] = '\0';
+  return do_opendir(safe_path);
 }
 
 //
@@ -187,9 +345,13 @@ ssize_t sys_user_readdir(int fd, struct dir *vdir){
 //
 // lib call to mkdir
 //
-ssize_t sys_user_mkdir(char * pathva){
-  char * pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
-  return do_mkdir(pathpa);
+ssize_t sys_user_mkdir(char *pathva){
+  char *pathpa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), pathva);
+  char safe_path[128];
+  int i = 0;
+  while (i < 127 && pathpa[i] != '\0') { safe_path[i] = pathpa[i]; i++; }
+  safe_path[i] = '\0';
+  return do_mkdir(safe_path);
 }
 
 //
@@ -211,9 +373,13 @@ ssize_t sys_user_link(char * vfn1, char * vfn2){
 //
 // lib call to unlink
 //
-ssize_t sys_user_unlink(char * vfn){
-  char * pfn = (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)vfn);
-  return do_unlink(pfn);
+ssize_t sys_user_unlink(char *vfn){
+  char *pfn = (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)vfn);
+  char safe_path[128];
+  int i = 0;
+  while (i < 127 && pfn[i] != '\0') { safe_path[i] = pfn[i]; i++; }
+  safe_path[i] = '\0';
+  return do_unlink(safe_path);
 }
 
 //
@@ -264,6 +430,10 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    case SYS_user_wait:
+      return sys_user_wait((int)a1);
+    case SYS_user_exec:
+      return sys_user_exec((char*)a1, (char*)a2);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

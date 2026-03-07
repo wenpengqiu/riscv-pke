@@ -9,45 +9,61 @@
 
 int main(int argc, char *argv[]) {
   printu("\n======== Shell Start ========\n\n");
-  int fd;
+
   int MAXBUF = 1024;
   char buf[MAXBUF];
-  char *token;
   char delim[3] = " \n";
-  fd = open("/shellrc", O_RDONLY);
 
-  read_u(fd, buf, MAXBUF);
+  int fd = open("/shellrc", O_RDONLY);
+  if (fd < 0) {
+    printu("open /shellrc failed!\n");
+    exit(-1);
+  }
+
+  int n = read_u(fd, buf, MAXBUF - 1);
   close(fd);
+  if (n < 0) {
+    printu("read /shellrc failed!\n");
+    exit(-1);
+  }
+  buf[n] = '\0';
+
   char *command = naive_malloc();
   char *para = naive_malloc();
-  int start = 0;
-  while (1)
-  {
-    if(!start) {
-      token = strtok(buf, delim);
-      start = 1;
-    }
-    else 
-      token = strtok(NULL, delim);
+
+  char *token = strtok(buf, delim);
+  while (token != NULL) {
     strcpy(command, token);
+
     token = strtok(NULL, delim);
-    strcpy(para, token);
-    if(strcmp(command, "END") == 0 && strcmp(para, "END") == 0)
+    if (token == NULL) {
+      printu("bad command line in shellrc!\n");
       break;
+    }
+    strcpy(para, token);
+
+    if (strcmp(command, "END") == 0 && strcmp(para, "END") == 0)
+      break;
+
     printu("Next command: %s %s\n\n", command, para);
     printu("==========Command Start============\n\n");
+
     int pid = fork();
-    if(pid == 0) {
+    if (pid == 0) {
       int ret = exec(command, para);
-      if (ret == -1)
-      printu("exec failed!\n");
-    }
-    else
-    {
+      if (ret == -1) printu("exec failed!\n");
+      exit(-1);
+    } else if (pid > 0) {
       wait(pid);
       printu("==========Command End============\n\n");
+    } else {
+      printu("fork failed!\n");
+      break;
     }
+
+    token = strtok(NULL, delim);
   }
+
   exit(0);
   return 0;
 }

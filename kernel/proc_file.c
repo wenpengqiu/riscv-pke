@@ -111,8 +111,11 @@ int do_read(int fd, char *buf, uint64 count) {
 
   char buffer[count + 1];
   int len = vfs_read(pfile, buffer, count);
-  buffer[count] = '\0';
-  strcpy(buf, buffer);
+  if (len < 0) return len;
+
+  if (len > 0) memcpy(buf, buffer, len);
+  if ((uint64)len < count) buf[len] = '\0';
+
   return len;
 }
 

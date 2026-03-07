@@ -257,23 +257,27 @@ struct vinode *rfs_alloc_vinode(struct super_block *sb) {
 // convert vfs inode to disk inode, and write it back to disk
 //
 int rfs_write_back_vinode(struct vinode *vinode) {
-  // copy vinode info to disk inode
-  struct rfs_dinode dinode;
-  dinode.size = vinode->size;
-  dinode.nlinks = vinode->nlinks;
-  dinode.blocks = vinode->blocks;
-  dinode.type = vinode->type;
-  for (int i = 0; i < RFS_DIRECT_BLKNUM; ++i) {
-    dinode.addrs[i] = vinode->addrs[i];
-  }
-
   struct rfs_device *rdev = rfs_device_list[vinode->sb->s_dev->dev_id];
-  if (rfs_write_dinode(rdev, &dinode, vinode->inum) != 0) {
-    sprint("rfs_free_write_back_inode: failed to write back disk inode!\n");
-    return -1;
+  
+  // 修复：不要使用栈空间(struct rfs_dinode dinode;)，防止 GCC 引发加载不对齐异常
+  // 改为在堆上使用强迫 4096 字节对齐的 alloc_page() 进行分配
+  struct rfs_dinode *dinode = (struct rfs_dinode *)alloc_page();
+  
+  dinode->size = vinode->size;
+  dinode->type = vinode->type;
+  dinode->nlinks = vinode->nlinks;
+  dinode->blocks = vinode->blocks;
+  
+  for (int i = 0; i < RFS_DIRECT_BLKNUM; ++i) {
+    dinode->addrs[i] = vinode->addrs[i];
   }
-
-  return 0;
+  
+  // 执行原本的写入操作
+  int ret = rfs_write_dinode(rdev, dinode, vinode->inum);
+  
+  // 用完切记要释放归还内存页
+  free_page(dinode);
+  return ret;
 }
 
 //
@@ -449,6 +453,7 @@ struct vinode *rfs_lookup(struct vinode *parent, struct dentry *sub_dentry) {
       rfs_r1block(rdev, parent->addrs[i / one_block_direntrys]);
       p_direntry = (struct rfs_direntry *)rdev->iobuffer;
     }
+    // sprint("rfs_lookup compare: p_direntry->name=[%s] vs sub_dentry->name=[%s]\n", p_direntry->name, sub_dentry->name); 
     if (strcmp(p_direntry->name, sub_dentry->name) == 0) {  // found
       child_vinode = rfs_alloc_vinode(parent->sb);
       child_vinode->inum = p_direntry->inum;
@@ -495,10 +500,11 @@ struct vinode *rfs_create(struct vinode *parent, struct dentry *sub_dentry) {
   // blocks, i.e., its block count.
   // Note: DO NOT DELETE CODE BELOW PANIC.
   // panic("You need to implement the code of populating a disk inode in lab4_1.\n" );
+  memset(free_dinode, 0, sizeof(struct rfs_dinode));
   free_dinode->size = 0;
   free_dinode->type = R_FILE;
   free_dinode->nlinks = 1;
-  free_dinode->blocks = 0;
+  free_dinode->blocks = 1;
 
   // DO NOT REMOVE ANY CODE BELOW.
   // allocate a free block for the file
@@ -621,7 +627,8 @@ int rfs_unlink(struct vinode *parent, struct dentry *sub_dentry, struct vinode *
       rfs_r1block(rdev, parent->addrs[delete_index / one_block_direntrys]);
       p_direntry = (struct rfs_direntry *)rdev->iobuffer;
     }
-    if (strcmp(p_direntry->name, sub_dentry->name) == 0) {  // found
+    if (p_direntry->name != NULL && sub_dentry->name != NULL && 
+    strcmp(p_direntry->name, sub_dentry->name) == 0) {  // found
       break;
     }
     ++p_direntry;

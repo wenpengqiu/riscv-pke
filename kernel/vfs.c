@@ -3,7 +3,7 @@
  */
 
 #include "vfs.h"
-
+#include "riscv.h"
 #include "pmm.h"
 #include "spike_interface/spike_utils.h"
 #include "util/string.h"
@@ -358,6 +358,12 @@ int vfs_unlink(const char *path) {
 // close a file at vfs layer.
 //
 int vfs_close(struct file *file) {
+  // 保留基础的安全检查即可
+  if (file == NULL) return -1;
+  if (file->f_dentry == NULL) return -1;
+  if (file->f_dentry->dentry_inode == NULL) return -1;
+  // ======================================
+
   if (file->f_dentry->dentry_inode->type != FILE_I) {
     sprint("vfs_close: cannot close a directory!\n");
     return -1;
@@ -445,11 +451,13 @@ int vfs_readdir(struct file *file, struct dir *dir) {
 int vfs_mkdir(const char *path) {
   struct dentry *parent = vfs_root_dentry;
   char miss_name[MAX_PATH_LEN];
+  // sprint("vfs_mkdir: requested path=[%s]\n", path);
 
   // lookup the dir, find its parent direntry
   struct dentry *file_dentry = lookup_final_dentry(path, &parent, miss_name);
   if (file_dentry) {
-    sprint("vfs_mkdir: the directory already exists!\n");
+    // sprint("vfs_mkdir: Error! File dentry evaluates as True, name=[%s]\n", file_dentry->name);
+    // sprint("vfs_mkdir: the directory already exists!\n");
     return -1;
   }
 
@@ -511,50 +519,38 @@ struct dentry *lookup_final_dentry(const char *path, struct dentry **parent,
                                    char *miss_name) {
   char path_copy[MAX_PATH_LEN];
   strcpy(path_copy, path);
-
-  // split the path, and retrieves a token at a time.
-  // note: strtok() uses a static (local) variable to store the input path
-  // string at the first time it is called. thus it can out a token each time.
-  // for example, when input path is: /RAMDISK0/test_dir/ramfile2
-  // strtok() outputs three tokens: 1)RAMDISK0, 2)test_dir and 3)ramfile2
-  // at its three continuous invocations.
   char *token = strtok(path_copy, "/");
   struct dentry *this = *parent;
 
   while (token != NULL) {
+    // sprint("lookup: token=[%s]\n", token); // 抓取切出来的各段
     *parent = this;
-    this = hash_get_dentry((*parent), token);  // try hash first
+    this = hash_get_dentry((*parent), token);
     if (this == NULL) {
-      // if not found in hash, try to find it in the directory
+      // sprint("lookup: hash miss, call viop_lookup for [%s]\n", token);
       this = alloc_vfs_dentry(token, NULL, *parent);
-      // lookup subfolder/file in its parent directory. note:
-      // hostfs and rfs will take different procedures for lookup.
       struct vinode *found_vinode = viop_lookup((*parent)->dentry_inode, this);
       if (found_vinode == NULL) {
-        // not found in both hash table and directory file on disk.
+        // sprint("lookup: viop_lookup returned NULL for [%s]\n", token);
         free_page(this);
         strcpy(miss_name, token);
         return NULL;
       }
-
+      // 此处是导致 “already exists” 误判的核心疑点：明明不存在，底层却说找到了！
+      // sprint("lookup: viop_lookup STRANGELY FOUND something for [%s]!\n", token);
       struct vinode *same_inode = hash_get_vinode(found_vinode->sb, found_vinode->inum);
       if (same_inode != NULL) {
-        // the vinode is already in the hash table (i.e. we are opening another hard link)
         this->dentry_inode = same_inode;
         same_inode->ref++;
         free_page(found_vinode);
       } else {
-        // the vinode is not in the hash table
         this->dentry_inode = found_vinode;
         found_vinode->ref++;
         hash_put_vinode(found_vinode);
       }
-
       hash_put_dentry(this);
     }
-
-    // get next token
-    token = strtok(NULL, "/");
+    token = strtok(NULL, "/");  // 抓取下一个词
   }
   return this;
 }
@@ -581,7 +577,8 @@ void get_base_name(const char *path, char *base_name) {
 //
 struct file *alloc_vfs_file(struct dentry *file_dentry, int readable, int writable,
                         int offset) {
-  struct file *file = alloc_page();
+  struct file *file = (struct file *)alloc_page();
+  memset(file, 0, PGSIZE);
   file->f_dentry = file_dentry;
   file_dentry->d_ref += 1;
 
@@ -598,6 +595,7 @@ struct file *alloc_vfs_file(struct dentry *file_dentry, int readable, int writab
 struct dentry *alloc_vfs_dentry(const char *name, struct vinode *inode,
                             struct dentry *parent) {
   struct dentry *dentry = (struct dentry *)alloc_page();
+  memset(dentry, 0, PGSIZE);
   strcpy(dentry->name, name);
   dentry->dentry_inode = inode;
   if (inode) inode->ref++;
@@ -621,8 +619,13 @@ int free_vfs_dentry(struct dentry *dentry) {
 
 // dentry generic hash table method implementation
 int dentry_hash_equal(void *key1, void *key2) {
-  struct dentry_key *dentry_key1 = key1;
+  // 注意：这里必须是 struct dentry_key，而不是 struct dentry！
+  struct dentry_key *dentry_key1 = key1; 
   struct dentry_key *dentry_key2 = key2;
+
+  if (dentry_key1 == NULL || dentry_key2 == NULL) return 0;
+  if (dentry_key1->name == NULL || dentry_key2->name == NULL) return 0;
+
   if (strcmp(dentry_key1->name, dentry_key2->name) == 0 &&
       dentry_key1->parent == dentry_key2->parent) {
     return 1;
@@ -646,12 +649,17 @@ size_t dentry_hash_func(void *key) {
 // dentry hash table interface
 struct dentry *hash_get_dentry(struct dentry *parent, char *name) {
   struct dentry_key key = {.parent = parent, .name = name};
-  return (struct dentry *)dentry_hash_table.virtual_hash_get(&dentry_hash_table,
-                                                             &key);
+  struct dentry* res = (struct dentry *)dentry_hash_table.virtual_hash_get(&dentry_hash_table, &key);
+  
+  if (res != NULL) {
+      // sprint("DEBUG HASH HIT: parent %p, searched name [%s] matched with [%s]\n", parent, name, res->name);
+  }
+  return res;
 }
 
 int hash_put_dentry(struct dentry *dentry) {
   struct dentry_key *key = alloc_page();
+  memset(key, 0, PGSIZE);
   key->name = dentry->name;
   key->parent = dentry->parent;
 
@@ -711,6 +719,7 @@ int hash_erase_vinode(struct vinode *vinode) {
 //
 struct vinode *default_alloc_vinode(struct super_block *sb) {
   struct vinode *vinode = (struct vinode *)alloc_page();
+  memset(vinode, 0, PGSIZE);
   vinode->blocks = 0;
   vinode->inum = 0;
   vinode->nlinks = 0;

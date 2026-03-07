@@ -75,18 +75,17 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
 // implements round-robin scheduling. added @lab3_3
 //
 void rrsched() {
-  // TODO (lab3_3): implements round-robin scheduling.
-  // hint: increase the tick_count member of current process by one, if it is bigger than
-  // TIME_SLICE_LEN (means it has consumed its time slice), change its status into READY,
-  // place it in the rear of ready queue, and finally schedule next process to run.
-  // panic( "You need to further implement the timer handling in lab3_3.\n" );
+  // 如果当前进程已经不是运行状态（比如它已经在 exit 时变为了 ZOMBIE，或者在 wait 时变为 BLOCKED），这说明它自己想死/想停，时钟中断就不该管它
+  if (current->status != RUNNING) {
+      return; 
+  }
+
   if (++current->tick_count >= TIME_SLICE_LEN) {
     current->tick_count = 0;       
     current->status = READY;      
     insert_to_ready_queue(current);
     schedule();
   }
-
 }
 
 //
@@ -130,5 +129,9 @@ void smode_trap_handler(void) {
   }
 
   // continue (come back to) the execution of current process.
-  switch_to(current);
+  if (current->status == RUNNING || current->status == READY) {
+      switch_to(current);
+  } else {
+      schedule(); 
+  }
 }

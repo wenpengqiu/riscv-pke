@@ -4,49 +4,66 @@
 
 #include <ctype.h>
 #include <stdint.h>
+#include "snprintf.h"
 
 void* memcpy(void* dest, const void* src, size_t len) {
   const char* s = src;
   char* d = dest;
 
-  if ((((uintptr_t)dest | (uintptr_t)src) & (sizeof(uintptr_t) - 1)) == 0) {
-    while ((void*)d < (dest + len - (sizeof(uintptr_t) - 1))) {
-      *(uintptr_t*)d = *(const uintptr_t*)s;
-      d += sizeof(uintptr_t);
-      s += sizeof(uintptr_t);
-    }
-  }
+  // if ((((uintptr_t)dest | (uintptr_t)src) & (sizeof(uintptr_t) - 1)) == 0) {
+  //   while ((void*)d < (dest + len - (sizeof(uintptr_t) - 1))) {
+  //     *(uintptr_t*)d = *(const uintptr_t*)s;
+  //     d += sizeof(uintptr_t);
+  //     s += sizeof(uintptr_t);
+  //   }
+  // }
 
   while (d < (char*)(dest + len)) *d++ = *s++;
 
   return dest;
 }
 
-void* memset(void* dest, int byte, size_t len) {
-  if ((((uintptr_t)dest | len) & (sizeof(uintptr_t) - 1)) == 0) {
-    uintptr_t word = byte & 0xFF;
-    word |= word << 8;
-    word |= word << 16;
-    word |= word << 16 << 16;
+// void* memset(void* dest, int byte, size_t len) {
+//   if ((((uintptr_t)dest | len) & (sizeof(uintptr_t) - 1)) == 0) {
+//     uintptr_t word = byte & 0xFF;
+//     word |= word << 8;
+//     word |= word << 16;
+//     word |= word << 16 << 16;
+// 
+//     uintptr_t* d = dest;
+//     while (d < (uintptr_t*)(dest + len)) *d++ = word;
+//   } else {
+//     char* d = dest;
+//     while (d < (char*)(dest + len)) *d++ = byte;
+//   }
+//   return dest;
+// }
 
-    uintptr_t* d = dest;
-    while (d < (uintptr_t*)(dest + len)) *d++ = word;
-  } else {
-    char* d = dest;
-    while (d < (char*)(dest + len)) *d++ = byte;
+void* memset(void* dest, int byte, size_t len) {
+  char* d = dest;
+  while (d < (char*)(dest + len)) {
+    *d++ = byte;
   }
   return dest;
 }
 
 size_t strlen(const char* s) {
+  // ======= 新增拦截 =======
+  if (s == NULL) return 0;
+  // =======================
+  
   const char* p = s;
   while (*p) p++;
   return p - s;
 }
 
 int strcmp(const char* s1, const char* s2) {
-  unsigned char c1, c2;
+  if (s1 == NULL || s2 == NULL) {
+    if (s1 == s2) return 0;
+    return -1; 
+  }
 
+  unsigned char c1, c2;
   do {
     c1 = *s1++;
     c2 = *s2++;
@@ -56,6 +73,10 @@ int strcmp(const char* s1, const char* s2) {
 }
 
 char* strcpy(char* dest, const char* src) {
+  // ======= 新增拦截 =======
+  if (dest == NULL || src == NULL) return dest;
+  // =======================
+  
   char* d = dest;
   while ((*d++ = *src++))
     ;
@@ -64,14 +85,14 @@ char* strcpy(char* dest, const char* src) {
 
 char *strchr(const char *p, int ch)
 {
-	char c;
-	c = ch;
-	for (;; ++p) {
-		if (*p == c)
-			return ((char *)p);
-		if (*p == '\0')
-			return (NULL);
-	}
+    char c;
+    c = ch;
+    for (;; ++p) {
+        if (*p == c)
+            return ((char *)p);
+        if (*p == '\0')
+            return (NULL);
+    }
 }
 
 char* strtok(char* str, const char* delim) {
@@ -99,6 +120,7 @@ char* strtok(char* str, const char* delim) {
 }
 
 char *strcat(char *dst, const char *src) {
+  if (dst == NULL || src == NULL) return dst;
   strcpy(dst + strlen(dst), src);
   return dst;
 }
@@ -122,18 +144,23 @@ long atol(const char* str) {
   return sign ? -res : res;
 }
 
-void* memmove(void* dst, const void* src, size_t n) {
-  const char* s;
-  char* d;
-
-  s = src;
-  d = dst;
-  if (s < d && s + n > d) {
-    s += n;
-    d += n;
-    while (n-- > 0) *--d = *--s;
-  } else
-    while (n-- > 0) *d++ = *s++;
+void* memmove(void* dst, const void* src, size_t len) {
+  const char* s = src;
+  char* d = dst;
+  
+  if (d < s) {
+    // 同样的，屏蔽掉任何可能强行提速带来的 AMO 未对齐隐患，用单体字节循环
+    while (len--) {
+      *d++ = *s++;
+    }
+  } else {
+    // Backward copy
+    const char* lasts = s + len - 1;
+    char* lastd = d + len - 1;
+    while (len--) {
+      *lastd-- = *lasts--;
+    }
+  }
 
   return dst;
 }

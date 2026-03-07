@@ -120,8 +120,7 @@ int hostfs_write_back_vinode(struct vinode *vinode) { return 0; }
 //
 int hostfs_update_vinode(struct vinode *vinode) {
   spike_file_t *f = vinode->i_fs_info;
-  if ((int64)f < 0) {  // is a direntry
-    vinode->type = H_DIR;
+  if ((int64)f < 0) {
     return -1;
   }
 
@@ -138,7 +137,7 @@ int hostfs_update_vinode(struct vinode *vinode) {
   } else if (S_ISREG(stat.st_mode)) {
     vinode->type = H_FILE;
   } else {
-    sprint("hostfs_lookup:unknown file type!");
+    sprint("hostfs_lookup: unknown file type!\n");
     return -1;
   }
 
@@ -182,15 +181,22 @@ ssize_t hostfs_write(struct vinode *f_inode, const char *w_buf, ssize_t len,
 // lookup a hostfs file, and establish its vfs inode in PKE vfs.
 //
 struct vinode *hostfs_lookup(struct vinode *parent, struct dentry *sub_dentry) {
-  // get complete path string
   char path[MAX_PATH_LEN];
   get_path_string(path, sub_dentry);
 
-  spike_file_t *f = spike_file_open(path, O_RDWR, 0);
+  spike_file_t *f = spike_file_open(path, O_RDONLY, 0);
+  if ((int64)f < 0) {
+    return NULL;
+  }
 
   struct vinode *child_inode = hostfs_alloc_vinode(parent->sb);
   child_inode->i_fs_info = f;
-  hostfs_update_vinode(child_inode);
+
+  if (hostfs_update_vinode(child_inode) != 0) {
+    spike_file_close(f);
+    free_page(child_inode);
+    return NULL;
+  }
 
   child_inode->ref = 0;
   return child_inode;

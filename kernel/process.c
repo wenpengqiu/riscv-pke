@@ -162,13 +162,8 @@ process* alloc_process() {
 //
 // reclaim a process. added @lab3_1
 //
-int free_process( process* proc ) {
-  // we set the status to ZOMBIE, but cannot destruct its vm space immediately.
-  // since proc can be current process, and its user kernel stack is currently in use!
-  // but for proxy kernel, it (memory leaking) may NOT be a really serious issue,
-  // as it is different from regular OS, which needs to run 7x24.
+int free_process(process* proc) {
   proc->status = ZOMBIE;
-
   return 0;
 }
 
@@ -187,6 +182,7 @@ int do_fork( process* parent)
   for( int i=0; i<parent->total_mapped_region; i++ ){
     // browse parent's vm space, and copy its trapframe and data segments,
     // map its code segment.
+    int free_block_filter[MAX_HEAP_PAGES];
     switch( parent->mapped_info[i].seg_type ){
       case CONTEXT_SEGMENT:
         *child->trapframe = *parent->trapframe;
@@ -200,7 +196,6 @@ int do_fork( process* parent)
 
         // convert free_pages_address into a filter to skip reclaimed blocks in the heap
         // when mapping the heap blocks
-        int free_block_filter[MAX_HEAP_PAGES];
         memset(free_block_filter, 0, MAX_HEAP_PAGES);
         uint64 heap_bottom = parent->user_heap.heap_bottom;
         for (int i = 0; i < parent->user_heap.free_pages_count; i++) {
@@ -237,9 +232,12 @@ int do_fork( process* parent)
         // DO NOT COPY THE PHYSICAL PAGES, JUST MAP THEM.
         // panic( "You need to implement the code segment mapping of child in lab3_1.\n" );
         for (int j = 0; j < parent->mapped_info[i].npages; j++) {
-          uint64 pa_of_mapped_va = lookup_pa(parent->pagetable, parent->mapped_info[i].va + j * PGSIZE);
-          // 建立父进程位于 pa_of_mapped_va 的代码段与子进程对应逻辑地址的映射
-          map_pages(child->pagetable, parent->mapped_info[i].va + j * PGSIZE, PGSIZE, pa_of_mapped_va, prot_to_type(PROT_READ | PROT_EXEC, 1));
+          uint64 va = parent->mapped_info[i].va + j * PGSIZE;
+          uint64 pa_of_mapped_va = lookup_pa(parent->pagetable, va);
+          sprint("do_fork map code segment at pa:%016lx of parent to child at va:%016lx.\n",
+                 pa_of_mapped_va, va);
+          map_pages(child->pagetable, va, PGSIZE, pa_of_mapped_va,
+                    prot_to_type(PROT_READ | PROT_EXEC, 1));
         }
 
         // after mapping, register the vm region (do not delete codes below!)
@@ -255,6 +253,7 @@ int do_fork( process* parent)
   child->status = READY;
   child->trapframe->regs.a0 = 0;
   child->parent = parent;
+  child->pfiles->cwd = parent->pfiles->cwd;
   insert_to_ready_queue( child );
 
   return child->pid;
